@@ -1,27 +1,22 @@
 """
 inference.py — SQLQueryEnv Baseline Inference Script
-Follows OpenEnv structured logging format exactly: [START], [STEP], [END].
+Structured stdout logs: [START], [STEP], [END] plain text format.
 
 Environment variables required:
   API_BASE_URL  — LLM API endpoint
   MODEL_NAME    — model identifier
-  HF_TOKEN      — Hugging Face / API key (used as api_key)
-
-Optional:
-  LOCAL_IMAGE_NAME — Docker image name (if using from_docker_image())
+  HF_TOKEN      — Hugging Face / API key
 """
 
 import asyncio
-import json
 import os
 import sys
-import time
 from typing import List
 
 import httpx
 from openai import OpenAI
 
-# ─── Config from environment variables ────────────────────────────────────────
+# ─── Config ───────────────────────────────────────────────────────────────────
 
 API_BASE_URL: str = os.getenv("API_BASE_URL", "https://api-inference.huggingface.co/v1/")
 MODEL_NAME: str   = os.getenv("MODEL_NAME",   "meta-llama/Llama-3.1-8B-Instruct")
@@ -35,36 +30,18 @@ MAX_TOTAL_REWARD        = 7.0
 SUCCESS_SCORE_THRESHOLD = 0.8
 
 
-# ─── Structured Logging — exact format from sample inference.py ───────────────
+# ─── Structured Logging — exact plain text format required ────────────────────
 
 def log_start(task: str, env: str, model: str) -> None:
-    print(json.dumps({
-        "type":  "START",
-        "task":  task,
-        "env":   env,
-        "model": model,
-    }), flush=True)
+    print(f"[START] task={task} env={env} model={model}", flush=True)
 
 
 def log_step(step: int, action: str, reward: float, done: bool, error=None) -> None:
-    print(json.dumps({
-        "type":   "STEP",
-        "step":   step,
-        "action": action,
-        "reward": reward,
-        "done":   done,
-        "error":  error,
-    }), flush=True)
+    print(f"[STEP] step={step} reward={reward} done={done}", flush=True)
 
 
 def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
-    print(json.dumps({
-        "type":    "END",
-        "success": success,
-        "steps":   steps,
-        "score":   score,
-        "rewards": rewards,
-    }), flush=True)
+    print(f"[END] success={success} steps={steps} score={score}", flush=True)
 
 
 # ─── LLM Agent ────────────────────────────────────────────────────────────────
@@ -168,7 +145,6 @@ async def main() -> None:
     for task in tasks:
         task_id   = task["task_id"]
         task_name = task["name"]
-        print(f"[DEBUG] Running task: {task_id} ({task['difficulty']})", flush=True)
 
         history: List[str] = []
         rewards: List[float] = []
@@ -192,12 +168,11 @@ async def main() -> None:
                 observation = result["observation"]
                 reward      = float(result.get("reward") or 0.0)
                 done        = result.get("done", False)
-                error       = None
 
                 rewards.append(reward)
                 steps_taken = step
 
-                log_step(step=step, action=message, reward=reward, done=done, error=error)
+                log_step(step=step, action=message, reward=reward, done=done)
                 history.append(f"Step {step}: {message!r} -> reward {reward:+.2f}")
 
                 if done:
@@ -213,12 +188,10 @@ async def main() -> None:
             try:
                 env.close()
             except Exception as e:
-                print(f"[DEBUG] env.close() error (container cleanup): {e}", flush=True)
-
+                print(f"[DEBUG] env.close() error: {e}", flush=True)
             log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
         all_scores.append(score)
-        print(f"[DEBUG] Score: {score:.3f}", flush=True)
 
     overall = sum(all_scores) / len(all_scores) if all_scores else 0.0
     print(f"[DEBUG] Overall: {overall:.3f}", flush=True)
