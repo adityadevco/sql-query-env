@@ -1,179 +1,142 @@
 """
-inference.py — SQLQueryEnv Baseline Inference Script
-Structured stdout logs: [START], [STEP], [END] plain text format.
-
-Environment variables required:
-  API_BASE_URL  — LLM API endpoint
-  MODEL_NAME    — model identifier
-  HF_TOKEN      — Hugging Face / API key
+inference.py - SQLQueryEnv Baseline Inference Script
+Required env vars: API_BASE_URL, MODEL_NAME, HF_TOKEN, SPACE_URL
 """
 
 import asyncio
 import os
 import sys
 from typing import List
-
 import httpx
 from openai import OpenAI
 
-# ─── Config ───────────────────────────────────────────────────────────────────
-
-API_BASE_URL: str = os.getenv("API_BASE_URL", "https://api-inference.huggingface.co/v1/")
-MODEL_NAME: str   = os.getenv("MODEL_NAME",   "meta-llama/Llama-3.1-8B-Instruct")
-API_KEY: str      = os.getenv("HF_TOKEN",     "dummy")
-SPACE_URL = os.getenv("SPACE_URL", "https://adityadevco-sql-query-env.hf.space")
-LOCAL_IMAGE_NAME: str = os.getenv("LOCAL_IMAGE_NAME", "")
+# ── Config ────────────────────────────────────────────────────────────────────
+API_BASE_URL   = os.getenv("API_BASE_URL",  "https://api-inference.huggingface.co/v1/")
+MODEL_NAME     = os.getenv("MODEL_NAME",    "meta-llama/Llama-3.1-8B-Instruct")
+API_KEY        = os.getenv("HF_TOKEN",      "dummy")
+SPACE_URL      = os.getenv("SPACE_URL",     "https://adityadevco-sql-query-env.hf.space")
 
 BENCHMARK               = "sql-query-env"
-MAX_STEPS               = 7
-MAX_TOTAL_REWARD        = 7.0
+MAX_STEPS               = 5
+MAX_TOTAL_REWARD        = 5.0
 SUCCESS_SCORE_THRESHOLD = 0.8
 
-
-# ─── Structured Logging — exact plain text format required ────────────────────
-
+# ── Logging — exact format the validator parses ───────────────────────────────
 def log_start(task: str, env: str, model: str) -> None:
     print(f"[START] task={task} env={env} model={model}", flush=True)
 
-
 def log_step(step: int, action: str, reward: float, done: bool, error=None) -> None:
-    print(f"[STEP] step={step} reward={reward} done={done}", flush=True)
-
+    err = f" error={error}" if error else ""
+    print(f"[STEP] step={step} reward={round(reward,4)} done={done}{err}", flush=True)
 
 def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
-    print(f"[END] success={success} steps={steps} score={score}", flush=True)
+    print(f"[END] success={success} steps={steps} score={round(score,4)}", flush=True)
 
-
-# ─── LLM Agent ────────────────────────────────────────────────────────────────
-
-SYSTEM_PROMPT = """You are an expert SQL analyst. You will be given:
-1. A database schema (CREATE TABLE statements)
-2. A business question to answer with SQL
-
-Your job: Write a single, correct SQL query that answers the question.
-
+# ── System prompt ─────────────────────────────────────────────────────────────
+SYSTEM_PROMPT = """You are an expert SQL analyst. Write a single correct SQL query.
 Rules:
-- Use SQLite syntax
-- Always end your query with a semicolon
-- Return ONLY the SQL query — no explanation, no markdown, no backticks
-- Use explicit column aliases that match the expected output columns
-- Always use WHERE status = 'completed' when filtering order status unless told otherwise
-- For date math, use julianday() in SQLite
+- SQLite syntax only
+- End with semicolon
+- Return ONLY the SQL query, no markdown, no explanation
+- Use explicit column aliases matching the expected output
+- Filter WHERE status = 'completed' for orders unless told otherwise
+- Use julianday() for date math"""
 
-If you made an error before, fix it based on the feedback provided."""
-
-
-def get_model_message(client: OpenAI, observation: dict, history: List[str]) -> str:
-    schema     = observation.get("schema_ddl", "")
-    question   = observation.get("business_question", "")
-    hint       = observation.get("hint", "")
-    prev_error = observation.get("previous_error", "")
-    prev_sql   = observation.get("previous_sql", "")
-    difficulty = observation.get("difficulty", "")
-
-    user_content = f"Database Schema:\n{schema}\n\nBusiness Question:\n{question}\n\nDifficulty: {difficulty}"
-    if hint:
-        user_content += f"\nHint: {hint}"
-    if prev_sql:
-        user_content += f"\n\nYour previous SQL attempt:\n{prev_sql}"
-    if prev_error:
-        user_content += f"\n\nError/Feedback: {prev_error}\nPlease fix the query."
+# ── LLM call ─────────────────────────────────────────────────────────────────
+def get_sql(client: OpenAI, obs: dict, history: List[str]) -> str:
+    content = f"Schema:\n{obs.get('schema_ddl','')}\n\nQuestion:\n{obs.get('business_question','')}\nDifficulty: {obs.get('difficulty','')}"
+    if obs.get("hint"):
+        content += f"\nHint: {obs['hint']}"
+    if obs.get("previous_sql"):
+        content += f"\n\nPrevious attempt:\n{obs['previous_sql']}"
+    if obs.get("previous_error"):
+        content += f"\nFeedback: {obs['previous_error']}\nFix the query."
     if history:
-        user_content += "\n\nHistory:\n" + "\n".join(history[-3:])
-
+        content += "\n\nHistory:\n" + "\n".join(history[-2:])
     try:
-        response = client.chat.completions.create(
+        resp = client.chat.completions.create(
             model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user",   "content": user_content},
-            ],
-            max_tokens=512,
+            messages=[{"role":"system","content":SYSTEM_PROMPT},
+                      {"role":"user","content":content}],
+            max_tokens=400,
             temperature=0.1,
         )
-        sql = response.choices[0].message.content.strip()
-        sql = sql.replace("```sql", "").replace("```", "").strip()
-        return sql
-    except Exception as exc:
-        print(f"[DEBUG] Model request failed: {exc}", flush=True)
+        sql = resp.choices[0].message.content.strip()
+        return sql.replace("```sql","").replace("```","").strip()
+    except Exception as e:
+        print(f"[DEBUG] LLM error: {e}", flush=True)
         return "SELECT 1;"
 
+# ── HTTP env client ───────────────────────────────────────────────────────────
+class Env:
+    def __init__(self, url: str):
+        self.url = url.rstrip("/")
+        self.client = httpx.Client(timeout=60)
 
-# ─── Environment HTTP Client ──────────────────────────────────────────────────
-
-class EnvClient:
-    def __init__(self, base_url: str):
-        self.base_url = base_url.rstrip("/")
-
-    def reset(self, task_id: str = None) -> dict:
-        payload = {"task_id": task_id} if task_id else {}
-        r = httpx.post(f"{self.base_url}/reset", json=payload, timeout=60)
+    def reset(self, task_id=None):
+        r = self.client.post(f"{self.url}/reset", json={"task_id": task_id} if task_id else {})
         r.raise_for_status()
         return r.json()
 
-    def step(self, sql_query: str) -> dict:
-        r = httpx.post(f"{self.base_url}/step", json={"sql_query": sql_query}, timeout=60)
+    def step(self, sql: str):
+        r = self.client.post(f"{self.url}/step", json={"sql_query": sql})
         r.raise_for_status()
         return r.json()
 
-    def tasks(self) -> list:
-        r = httpx.get(f"{self.base_url}/tasks", timeout=30)
+    def tasks(self):
+        r = self.client.get(f"{self.url}/tasks")
         r.raise_for_status()
         return r.json()["tasks"]
 
-    def close(self):
-        pass
+# ── Main ──────────────────────────────────────────────────────────────────────
+def main():
+    print(f"[DEBUG] space={SPACE_URL} model={MODEL_NAME}", flush=True)
 
-
-# ─── Main ─────────────────────────────────────────────────────────────────────
-
-async def main() -> None:
     client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-    env    = EnvClient(SPACE_URL)
-
-    print(f"[DEBUG] Connecting to {SPACE_URL}", flush=True)
-    print(f"[DEBUG] Model: {MODEL_NAME}", flush=True)
+    env = Env(SPACE_URL)
 
     try:
         tasks = env.tasks()
     except Exception as e:
-        print(f"[DEBUG] Cannot connect to env: {e}", flush=True)
+        print(f"[DEBUG] Cannot reach env: {e}", flush=True)
+        # Still emit START/END so validator sees the blocks
+        log_start(task="unknown", env=BENCHMARK, model=MODEL_NAME)
+        log_end(success=False, steps=0, score=0.0, rewards=[])
         sys.exit(1)
 
     all_scores = []
 
     for task in tasks:
-        task_id   = task["task_id"]
-        task_name = task["name"]
-
+        tid   = task["task_id"]
+        tname = task["name"]
         history: List[str] = []
         rewards: List[float] = []
         steps_taken = 0
         score   = 0.0
         success = False
 
-        log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
+        log_start(task=tname, env=BENCHMARK, model=MODEL_NAME)
 
         try:
-            result      = env.reset(task_id=task_id)
-            observation = result["observation"]
+            result = env.reset(task_id=tid)
+            obs    = result["observation"]
 
             for step in range(1, MAX_STEPS + 1):
                 if result.get("done", False):
                     break
 
-                message = get_model_message(client, observation, history)
-                result  = env.step(message)
-
-                observation = result["observation"]
-                reward      = float(result.get("reward") or 0.0)
-                done        = result.get("done", False)
+                sql    = get_sql(client, obs, history)
+                result = env.step(sql)
+                obs    = result["observation"]
+                reward = float(result.get("reward") or 0.0)
+                done   = result.get("done", False)
+                info   = result.get("info", {})
+                error  = info.get("feedback") if reward < 0.5 else None
 
                 rewards.append(reward)
                 steps_taken = step
-
-                log_step(step=step, action=message, reward=reward, done=done)
-                history.append(f"Step {step}: {message!r} -> reward {reward:+.2f}")
+                log_step(step=step, action=sql, reward=reward, done=done, error=error)
+                history.append(f"step={step} reward={reward:.3f}")
 
                 if done:
                     break
@@ -183,19 +146,16 @@ async def main() -> None:
             success = score >= SUCCESS_SCORE_THRESHOLD
 
         except Exception as e:
-            print(f"[DEBUG] Task error: {e}", flush=True)
+            print(f"[DEBUG] task error: {e}", flush=True)
         finally:
-            try:
-                env.close()
-            except Exception as e:
-                print(f"[DEBUG] env.close() error: {e}", flush=True)
             log_end(success=success, steps=steps_taken, score=score, rewards=rewards)
 
         all_scores.append(score)
+        print(f"[DEBUG] {tid} score={score:.3f}", flush=True)
 
     overall = sum(all_scores) / len(all_scores) if all_scores else 0.0
-    print(f"[DEBUG] Overall: {overall:.3f}", flush=True)
+    print(f"[DEBUG] overall={overall:.3f}", flush=True)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
