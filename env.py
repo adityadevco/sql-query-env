@@ -5,7 +5,6 @@ An AI agent receives a database schema + business question and must
 write correct, efficient SQL. Tasks range from simple SELECTs to
 complex window functions with business logic.
 """
-
 import sqlite3
 import re
 import time
@@ -15,11 +14,9 @@ from typing import Optional, Any
 from pydantic import BaseModel, Field
 from openenv import Environment, StepResult
 
-
 # ─────────────────────────────────────────────
 # Typed Models
 # ─────────────────────────────────────────────
-
 class SQLObservation(BaseModel):
     task_id: str
     task_name: str
@@ -33,23 +30,19 @@ class SQLObservation(BaseModel):
     step_number: int = 0
     max_steps: int = 5
 
-
 class SQLAction(BaseModel):
     sql_query: str = Field(..., description="The SQL query to execute against the database")
 
-
 class SQLReward(BaseModel):
-    score: float = Field(..., ge=0.0, le=1.0)
+    score: float = Field(..., ge=0.001, le=0.999)  # strictly between 0 and 1
     correctness: float
     efficiency: float
     style: float
     feedback: str
 
-
 # ─────────────────────────────────────────────
 # Task Definitions
 # ─────────────────────────────────────────────
-
 TASKS = {
     "easy_sales_summary": {
         "name": "Sales Summary Report",
@@ -101,7 +94,6 @@ INSERT INTO orders VALUES
         "hint": "Revenue = quantity * unit_price. Filter by status = 'completed'.",
         "max_steps": 5,
     },
-
     "medium_customer_cohort": {
         "name": "Customer Cohort Analysis",
         "difficulty": "medium",
@@ -151,7 +143,6 @@ Sort by total_spent descending.""",
         "hint": "Use GROUP BY with HAVING. Extract month from order_date using strftime('%m', order_date).",
         "max_steps": 7,
     },
-
     "hard_running_metrics": {
         "name": "Running Revenue & Churn Risk Analysis",
         "difficulty": "hard",
@@ -202,7 +193,6 @@ INSERT INTO orders VALUES
 - avg_order_value (completed only)
 - months_since_last_order (months between their last completed order and '2024-05-01')
 - churn_risk: 'High' if months_since_last_order >= 2 AND total_orders <= 2, 'Medium' if months_since_last_order >= 2 AND total_orders > 2, else 'Low'
-
 Only include customers with at least 1 completed order.
 Sort by churn_risk (High first, then Medium, then Low), then total_spent desc.""",
         "expected_columns": ["customer_name", "tier", "total_orders", "total_spent", "avg_order_value", "months_since_last_order", "churn_risk"],
@@ -218,11 +208,16 @@ Sort by churn_risk (High first, then Medium, then Low), then total_spent desc.""
     },
 }
 
+# ─────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────
+def _clamp(value: float) -> float:
+    """Clamp a score to strictly (0, 1) as required by OpenEnv."""
+    return min(max(value, 0.001), 0.999)
 
 # ─────────────────────────────────────────────
 # Grader Logic
 # ─────────────────────────────────────────────
-
 def normalize_rows(rows: list[dict]) -> list[dict]:
     """Normalize float precision for comparison."""
     normalized = []
@@ -236,7 +231,6 @@ def normalize_rows(rows: list[dict]) -> list[dict]:
         normalized.append(norm_row)
     return normalized
 
-
 def grade_sql(sql: str, task: dict, conn: sqlite3.Connection) -> SQLReward:
     """Execute SQL and grade the result."""
     expected_rows = task["expected_rows"]
@@ -249,7 +243,7 @@ def grade_sql(sql: str, task: dict, conn: sqlite3.Connection) -> SQLReward:
         style_score -= 0.2
     if not sql.strip().endswith(";"):
         style_score -= 0.05
-    style_score = max(0.0, style_score)
+    style_score = _clamp(style_score)
 
     try:
         cursor = conn.execute(sql)
@@ -266,18 +260,17 @@ def grade_sql(sql: str, task: dict, conn: sqlite3.Connection) -> SQLReward:
 
         # --- Row correctness ---
         if len(result_rows) == 0:
-            row_score = 0.0
+            row_score = 0.001
             feedback = "Query returned no rows."
         elif len(result_rows) != len(expected_norm):
-            # Partial credit for matching some rows
             matched = sum(1 for r in result_rows if r in expected_norm)
-            row_score = matched / len(expected_norm) * 0.5
+            row_score = _clamp(matched / len(expected_norm) * 0.5)
             feedback = f"Expected {len(expected_norm)} rows, got {len(result_rows)}. {matched} rows matched."
         else:
-            # Check if rows match (order-sensitive for sorted results)
             exact_matches = sum(1 for a, b in zip(result_rows, expected_norm) if a == b)
             row_score = exact_matches / len(expected_norm)
-            if row_score == 1.0:
+            if row_score >= 1.0:
+                row_score = 0.999
                 feedback = "Perfect! All rows match exactly."
             else:
                 # Try order-insensitive
@@ -286,9 +279,10 @@ def grade_sql(sql: str, task: dict, conn: sqlite3.Connection) -> SQLReward:
                     row_score = 0.85  # correct but wrong order
                     feedback = "Correct rows but wrong sort order."
                 else:
+                    row_score = _clamp(row_score)
                     feedback = f"{exact_matches}/{len(expected_norm)} rows correct."
 
-        correctness = (col_match * 0.3 + row_score * 0.7)
+        correctness = _clamp(col_match * 0.3 + row_score * 0.7)
 
         # --- Efficiency score (heuristic) ---
         efficiency = 1.0
@@ -298,35 +292,32 @@ def grade_sql(sql: str, task: dict, conn: sqlite3.Connection) -> SQLReward:
         if task["difficulty"] == "hard":
             if "CASE" not in sql_upper:
                 efficiency -= 0.2
-
-        efficiency = max(0.0, efficiency)
+        efficiency = _clamp(efficiency)
 
         # --- Final score ---
-        score = round(correctness * 0.7 + efficiency * 0.2 + style_score * 0.1, 3)
-        score = min(max(score, 0.0), 1.0)
+        raw_score = correctness * 0.7 + efficiency * 0.2 + style_score * 0.1
+        score = _clamp(round(raw_score, 3))
 
         return SQLReward(
             score=score,
-            correctness=round(correctness, 3),
-            efficiency=round(efficiency, 3),
-            style=round(style_score, 3),
+            correctness=correctness,
+            efficiency=efficiency,
+            style=style_score,
             feedback=feedback,
         )
 
     except Exception as e:
         return SQLReward(
             score=0.05,
-            correctness=0.0,
-            efficiency=0.0,
+            correctness=0.001,
+            efficiency=0.001,
             style=style_score,
             feedback=f"SQL Error: {str(e)}",
         )
 
-
 # ─────────────────────────────────────────────
 # Environment
 # ─────────────────────────────────────────────
-
 class SQLQueryEnv(Environment):
     """
     SQLQueryEnv: A real-world SQL environment where agents must write
@@ -359,7 +350,7 @@ class SQLQueryEnv(Environment):
         return conn
 
     def _make_sample_data_preview(self, task: dict) -> str:
-        """Return a JSON preview of seed data for context."""
+        """Return a preview of seed data for context."""
         lines = []
         for stmt in task["seed_data"].strip().split(";"):
             s = stmt.strip()
@@ -395,7 +386,7 @@ class SQLQueryEnv(Environment):
 
         return StepResult(
             observation=obs,
-            reward=0.0,
+            reward=0.001,  # reset reward is not a task score; use min valid value
             done=False,
             info={"task_id": self._current_task_id, "difficulty": self._current_task["difficulty"]},
         )
@@ -405,7 +396,7 @@ class SQLQueryEnv(Environment):
         if self._done:
             return StepResult(
                 observation=self._last_observation,
-                reward=0.0,
+                reward=0.001,  # episode over; return min valid value instead of 0.0
                 done=True,
                 info={"error": "Episode already done"},
             )
@@ -415,14 +406,13 @@ class SQLQueryEnv(Environment):
         self._last_sql = sql
 
         reward_obj = grade_sql(sql, self._current_task, self._conn)
-        score = reward_obj.score
+        score = reward_obj.score  # already clamped to (0.001, 0.999) by grade_sql
 
         # Determine if done
         max_steps = self._current_task["max_steps"]
         done = score >= 0.95 or self._step_count >= max_steps
         self._done = done
 
-        # Update observation with error info for next step
         error_msg = None
         if reward_obj.correctness < 0.5:
             error_msg = reward_obj.feedback
