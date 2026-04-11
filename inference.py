@@ -21,7 +21,7 @@ from openai import OpenAI
 API_BASE_URL: str = os.getenv("API_BASE_URL", "https://api-inference.huggingface.co/v1/")
 MODEL_NAME: str   = os.getenv("MODEL_NAME",   "meta-llama/Llama-3.1-8B-Instruct")
 API_KEY: str      = os.getenv("HF_TOKEN",     "dummy")
-SPACE_URL: str    = os.getenv("SPACE_URL",    "http://localhost:7860")
+SPACE_URL = os.getenv("SPACE_URL", "https://adityadevco-sql-query-env.hf.space")
 LOCAL_IMAGE_NAME: str = os.getenv("LOCAL_IMAGE_NAME", "")
 
 BENCHMARK               = "sql-query-env"
